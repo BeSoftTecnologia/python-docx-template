@@ -328,6 +328,7 @@ class DocxTemplate(object):
             .replace("%_}", "%}")
         )
         dst_xml = self.resolve_listing(dst_xml)
+        dst_xml = self.resolve_inherit_font(dst_xml)
         return dst_xml
 
     def render_properties(
@@ -428,6 +429,182 @@ class DocxTemplate(object):
             r"<w:p(?: [^>]*)?>.*?</w:p>", resolve_paragraph, xml, flags=re.DOTALL
         )
 
+        return xml
+
+    def resolve_inherit_font(self, xml):
+        """Substitui os placeholders __INHERIT_FONT__ e __INHERIT_SIZE__ pela fonte e tamanho do contexto.
+
+        Quando um RichText tem propriedades mas não especifica a fonte ou tamanho, adicionamos
+        placeholders que são substituídos aqui pela fonte/tamanho do run/parágrafo onde
+        o RichText está sendo inserido.
+        """
+        def get_font_from_rpr(rpr_xml):
+            """Extrai a fonte de um w:rPr."""
+            if not rpr_xml:
+                return None
+            patterns = [
+                r'<w:rFonts[^>]*w:ascii="([^"]+)"',
+                r'<w:rFonts[^>]*w:hAnsi="([^"]+)"',
+                r'<w:rFonts[^>]*w:cs="([^"]+)"',
+            ]
+            for pattern in patterns:
+                rfonts_match = re.search(pattern, rpr_xml)
+                if rfonts_match:
+                    font = rfonts_match.group(1)
+                    if font and font != "__INHERIT_FONT__":
+                        return font
+            return None
+
+        def get_size_from_rpr(rpr_xml):
+            """Extrai o tamanho da fonte de um w:rPr."""
+            if not rpr_xml:
+                return None
+            sz_match = re.search(r'<w:sz[^>]*w:val="([^"]+)"', rpr_xml)
+            if sz_match:
+                size = sz_match.group(1)
+                if size and size != "__INHERIT_SIZE__":
+                    return size
+            return None
+
+        def find_font_in_paragraph(paragraph_xml, target_run_pos):
+            """Encontra a fonte no parágrafo, procurando em todos os runs."""
+            all_runs = list(re.finditer(
+                r'<w:r[^>]*>.*?</w:r>',
+                paragraph_xml,
+                re.DOTALL
+            ))
+            for i, run_match in enumerate(all_runs):
+                if run_match.start() >= target_run_pos:
+                    for j in range(i - 1, -1, -1):
+                        prev_run = all_runs[j].group(0)
+                        rpr_match = re.search(r'<w:rPr>(.*?)</w:rPr>', prev_run, re.DOTALL)
+                        if rpr_match:
+                            font = get_font_from_rpr(rpr_match.group(0))
+                            if font:
+                                return font
+                    break
+            for run_match in all_runs:
+                run_xml = run_match.group(0)
+                rpr_match = re.search(r'<w:rPr>(.*?)</w:rPr>', run_xml, re.DOTALL)
+                if rpr_match:
+                    font = get_font_from_rpr(rpr_match.group(0))
+                    if font:
+                        return font
+            return None
+
+        def find_size_in_paragraph(paragraph_xml, target_run_pos):
+            """Encontra o tamanho da fonte no parágrafo, procurando em todos os runs."""
+            all_runs = list(re.finditer(
+                r'<w:r[^>]*>.*?</w:r>',
+                paragraph_xml,
+                re.DOTALL
+            ))
+            for i, run_match in enumerate(all_runs):
+                if run_match.start() >= target_run_pos:
+                    for j in range(i - 1, -1, -1):
+                        prev_run = all_runs[j].group(0)
+                        rpr_match = re.search(r'<w:rPr>(.*?)</w:rPr>', prev_run, re.DOTALL)
+                        if rpr_match:
+                            size = get_size_from_rpr(rpr_match.group(0))
+                            if size:
+                                return size
+                    break
+            for run_match in all_runs:
+                run_xml = run_match.group(0)
+                rpr_match = re.search(r'<w:rPr>(.*?)</w:rPr>', run_xml, re.DOTALL)
+                if rpr_match:
+                    size = get_size_from_rpr(rpr_match.group(0))
+                    if size:
+                        return size
+            return None
+
+        def replace_inherit_font_in_paragraph(m):
+            """Processa um parágrafo e substitui __INHERIT_FONT__ e __INHERIT_SIZE__ pelos valores do contexto."""
+            paragraph_xml = m.group(0)
+            runs_with_placeholder = list(re.finditer(
+                r'<w:r[^>]*>.*?<w:rPr>.*?(?:__INHERIT_FONT__|__INHERIT_SIZE__).*?</w:rPr>.*?</w:r>',
+                paragraph_xml,
+                re.DOTALL
+            ))
+            if not runs_with_placeholder:
+                return paragraph_xml
+            result = paragraph_xml
+            for run_match in reversed(runs_with_placeholder):
+                run_xml = run_match.group(0)
+                run_start = run_match.start()
+                rpr_match = re.search(r'<w:rPr>(.*?)</w:rPr>', run_xml, re.DOTALL)
+                if not rpr_match:
+                    continue
+                rpr_content = rpr_match.group(1)
+                font = find_font_in_paragraph(paragraph_xml, run_start)
+                if not font:
+                    before_run = paragraph_xml[:run_start]
+                    rfonts_before = re.findall(
+                        r'<w:rFonts[^>]*w:ascii="([^"]+)"',
+                        before_run
+                    )
+                    if rfonts_before:
+                        font = rfonts_before[-1]
+                        if font == "__INHERIT_FONT__":
+                            font = None
+                if not font:
+                    after_run = paragraph_xml[run_match.end():]
+                    rfonts_after = re.findall(
+                        r'<w:rFonts[^>]*w:ascii="([^"]+)"',
+                        after_run
+                    )
+                    if rfonts_after:
+                        font = rfonts_after[0]
+                        if font == "__INHERIT_FONT__":
+                            font = None
+                if not font:
+                    font = "Arial"
+                size = find_size_in_paragraph(paragraph_xml, run_start)
+                if not size:
+                    before_run = paragraph_xml[:run_start]
+                    sz_before = re.findall(
+                        r'<w:sz[^>]*w:val="([^"]+)"',
+                        before_run
+                    )
+                    if sz_before:
+                        size = sz_before[-1]
+                        if size == "__INHERIT_SIZE__":
+                            size = None
+                if not size:
+                    after_run = paragraph_xml[run_match.end():]
+                    sz_after = re.findall(
+                        r'<w:sz[^>]*w:val="([^"]+)"',
+                        after_run
+                    )
+                    if sz_after:
+                        size = sz_after[0]
+                        if size == "__INHERIT_SIZE__":
+                            size = None
+                if not size:
+                    size = "22"
+                new_rpr_content = rpr_content.replace("__INHERIT_FONT__", font)
+                new_rpr_content = new_rpr_content.replace("__INHERIT_SIZE__", size)
+                if "__INHERIT_FONT__" in new_rpr_content:
+                    new_rpr_content = new_rpr_content.replace("__INHERIT_FONT__", font)
+                if "__INHERIT_SIZE__" in new_rpr_content:
+                    new_rpr_content = new_rpr_content.replace("__INHERIT_SIZE__", size)
+                new_run_xml = run_xml.replace(
+                    rpr_match.group(0),
+                    "<w:rPr>%s</w:rPr>" % new_rpr_content
+                )
+                if "__INHERIT_FONT__" in new_run_xml:
+                    new_run_xml = new_run_xml.replace("__INHERIT_FONT__", font)
+                if "__INHERIT_SIZE__" in new_run_xml:
+                    new_run_xml = new_run_xml.replace("__INHERIT_SIZE__", size)
+                result = result[:run_match.start()] + new_run_xml + result[run_match.end():]
+            return result
+
+        xml = re.sub(
+            r'<w:p[^>]*>.*?</w:p>',
+            replace_inherit_font_in_paragraph,
+            xml,
+            flags=re.DOTALL
+        )
         return xml
 
     def build_xml(self, context, jinja_env=None):

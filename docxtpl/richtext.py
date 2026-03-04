@@ -73,6 +73,11 @@ class RichText(object):
         if size:
             prop += '<w:sz w:val="%s"/>' % size
             prop += '<w:szCs w:val="%s"/>' % size
+        else:
+            # Quando não há tamanho especificado, adicionamos um placeholder especial
+            # que será substituído pelo tamanho do contexto durante o processamento do template.
+            prop += '<w:sz w:val="__INHERIT_SIZE__"/>'
+            prop += '<w:szCs w:val="__INHERIT_SIZE__"/>'
         if subscript:
             prop += '<w:vertAlign w:val="subscript"/>'
         if superscript:
@@ -108,11 +113,21 @@ class RichText(object):
             prop += '<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:cs="{font}"{regional_font}/>'.format(
                 font=font, regional_font=regional_font
             )
+        else:
+            # Quando não há fonte especificada, sempre adicionamos um placeholder especial
+            # que será substituído pela fonte do contexto durante o processamento do template.
+            # Isso é necessário porque quando há um w:rPr presente (ou quando criamos um),
+            # o Word não herda automaticamente a fonte do template.
+            # O placeholder será substituído pela fonte do run/parágrafo onde
+            # o RichText está sendo inserido.
+            prop += '<w:rFonts w:ascii="__INHERIT_FONT__" w:hAnsi="__INHERIT_FONT__" w:cs="__INHERIT_FONT__"/>'
         if rtl:
             prop += '<w:rtl w:val="true"/>'
         if lang:
             prop += '<w:lang w:val="%s"/>' % lang
         xml = "<w:r>"
+        # Sempre criamos w:rPr quando há propriedades OU quando queremos herdar a fonte
+        # (mesmo que não haja outras propriedades, precisamos do placeholder da fonte)
         if prop:
             xml += "<w:rPr>%s</w:rPr>" % prop
         xml += '<w:t xml:space="preserve">%s</w:t></w:r>' % text
